@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+
+from flask import request, session
+from flask_restful import Resource
+from sqlalchemy.exc import IntegrityError
+
+from config import app, db, api
+from models import User, Recipe, Ingredient, RecipeIngredient, SavedRecipe
+from openai_service import generate_recipe
+
+@app.before_request
+def check_if_logged_in():
+    open_access_list = [
+        'signup',
+        'login',
+        'check_session'
+    ]
+
+    if (request.endpoint) not in open_access_list and (not session.get('user_id')):
+        return {'error': '401 Unauthorized'}, 401
+      
+class UsersController(Resource):
+    # POST /signup
+    def post(self):
+
+        request_json = request.get_json()
+
+        username = request_json.get('username')
+        password = request_json.get('password')
+        # image_url = request_json.get('image_url')
+        # bio = request_json.get('bio')
+        # breakpoint()
+        # breakpoint()
+        try:
+            user = User(
+                username=username,
+                # image_url=image_url,
+                # bio=bio
+            )
+            # the setter will encrypt this
+            user.password_hash = password
+        except ValueError as err:
+            # breakpoint()
+            return {'message': str(err)}, 400
+
+        try:
+
+            db.session.add(user)
+            db.session.commit()
+
+            session['user_id'] = user.id
+
+            return user.to_dict(), 201
+
+        except IntegrityError:
+
+            return {'error': '422 Unprocessable Entity'}, 422
+
+class SessionsController(Resource):
+    # GET /me
+    def get(self):
+        # breakpoint()
+        
+        user_id = session.get('user_id')
+        if user_id:
+            user = User.query.filter(User.id == user_id).first()
+            return user.to_dict(), 200
+        
+        return {'error': "Unauthorized."}, 401
+    
+    def post(self):
+
+        request_json = request.get_json()
+
+        username = request_json.get('username')
+        password = request_json.get('password')
+        # breakpoint()
+        user = User.query.filter(User.username == username).first()
+        # breakpoint()
+
+        if user:
+            if user.authenticate(password):
+
+                session['user_id'] = user.id
+                return user.to_dict(), 200
+
+        return {'message': 'Username or password is incorrect.'}, 401
+    
+    def delete(self):
+
+        session['user_id'] = None
+        
+        return {}, 204
+
+class RecipesController(Resource):
+    
+    def get(self):
+        # breakpoint()
+        if request.args.get("query") == "featured_recipes":
+            
+            user = User.query.get(session.get('user_id'))
+            recipes = Recipe.query.all()
+            saved_recipes_ids = [saved_recipe.recipe_id for saved_recipe in user.saved_recipes]
+            
+            response = []
+            for recipe in recipes:
+                recipe_dict = recipe.to_dict()
+                recipe_dict['is_saved'] = recipe.id in saved_recipes_ids
+                response.append(recipe_dict)
+            # breakpoint()
+            return response, 200
+        
+        elif request.args.get("query") == "saved_recipes":
+            user = User.query.filter(User.id == session['user_id']).first()
+            # breakpoint()
+            return [saved_recipe.recipe.to_dict() for saved_recipe in user.saved_recipes],200
+        
+        elif request.args.get("query") == "my_recipes":
+            user = User.query.filter(User.id == session['user_id']).first()
+            return [recipe.to_dict() for recipe in user.recipes], 200
+        
+    def post(self):
+        request_json = request.get_json()
+
+        title = request_json['title']
+        recipe_ingredients = request_json['recipe_ingredients']
+        instructions = request_json['instructions']
+        image_url = request_json['image_url']
+
+        try:
+            # Create the recipe
+            recipe = Recipe(
+                title=title,
+                instructions=instructions,
+                image_url=image_url,
+                user_id=session['user_id'],
+            )
+
+            db.session.add(recipe)
+            db.session.commit()
+
+            # Create recipe ingredients
+            for ingredient_data in recipe_ingredients:
+                ingredient_name = ingredient_data['name']
+                ingredient_amount = ingredient_data['amount']
+
+                # Check if the ingredient already exists
+                ingredient = Ingredient.query.filter_by(name=ingredient_name).first()
+
+                # If not, create a new ingredient
+                if not ingredient:
+                    ingredient = Ingredient(name=ingredient_name)
+                    db.session.add(ingredient)
+                    db.session.commit()  # Commit new ingredient before associating
+
+                # Create recipe ingredient association
+                recipe_ingredient = RecipeIngredient(
+                    recipe_id=recipe.id,
+                    ingredient_id=ingredient.id,
+                    amount=ingredient_amount
+                )
+                db.session.add(recipe_ingredient)
+
+            db.session.commit()
+
+            return recipe.to_dict(), 201
+
+        except IntegrityError:
+            db.session.rollback()  # Rollback changes if an error occurs
+            return {'error': '422 Unprocessable Entity'}, 422
+
+class SavedRecipesController(Resource):
+    def post(self):
+        json_data = request.get_json()
+        user_id = json_data["user_id"]
+        recipe_id = json_data["recipe_id"]
+        saved_recipe = SavedRecipe(
+            user_id=user_id,
+            recipe_id=recipe_id
+        )
+        db.session.add(saved_recipe)
+        db.session.commit()
+        return saved_recipe.to_dict(), 201
+    
+    def delete(self, id):
+        user = "luis"
+        breakpoint()
+
+api.add_resource(UsersController, '/signup', endpoint='users_controller')
+api.add_resource(SessionsController, '/me', endpoint='check_session')
+api.add_resource(SessionsController, '/login', endpoint='login')
+api.add_resource(SessionsController, '/logout', endpoint='logout')
+api.add_resource(RecipesController, '/recipes', endpoint='recipes_controller')
+api.add_resource(SavedRecipesController, '/saved_recipes', endpoint='saved_recipes_controller')
+api.add_resource(SavedRecipesController, '/saved_recipes/<int:id>', endpoint='saved_recipes')
+
+if __name__ == '__main__':
+    app.run(port=5555, debug=True)
